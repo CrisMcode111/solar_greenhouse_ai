@@ -182,6 +182,155 @@ def save_energy_plot(t_hours, E_profile, E_ideal, threshold, out_path: Path):
     print(f" Saved energy plot: {out_path}")
 
 
+# ======================================================
+# Dataset filtering: PlantVillage -> Greenhouse subset
+# ======================================================
+
+import shutil
+import json
+
+
+ALLOWED_KEYWORDS = [
+    "tomato",
+    "pepper",
+    "bell_pepper",
+    "grape",
+    "soybean",
+    "bean",
+    "strawberry",
+    "raspberry",
+]
+
+
+def list_class_folders(root: Path):
+    return sorted([p for p in root.iterdir() if p.is_dir()])
+
+
+def filter_classes_by_keywords(class_folders, allowed_keywords):
+    allowed = []
+    for p in class_folders:
+        name = p.name.lower()
+        if any(k.lower() in name for k in allowed_keywords):
+            allowed.append(p)
+    return allowed
+
+
+def copy_filtered_dataset(
+    src_root: Path,
+    dst_root: Path,
+    allowed_keywords=ALLOWED_KEYWORDS,
+    exts=(".jpg", ".jpeg", ".png", ".bmp"),
+    overwrite: bool = False,
+):
+    """
+    Copies only selected class folders into dst_root.
+    Returns a summary dict (counts, class names).
+    """
+    if dst_root.exists():
+        if overwrite:
+            shutil.rmtree(dst_root)
+        else:
+            # already exists: we won't recopy; just summarize what is there
+            existing_classes = list_class_folders(dst_root)
+            total_imgs = 0
+            for cls in existing_classes:
+                for ext in exts:
+                    total_imgs += len(list(cls.glob(f"*{ext}")))
+                    total_imgs += len(list(cls.glob(f"*{ext.upper()}")))
+            return {
+                "mode": "reused_existing_filtered",
+                "dst_root": str(dst_root),
+                "num_classes": len(existing_classes),
+                "classes": [p.name for p in existing_classes],
+                "num_images": total_imgs,
+            }
+
+    dst_root.mkdir(parents=True, exist_ok=True)
+
+    all_classes = list_class_folders(src_root)
+    allowed_class_folders = filter_classes_by_keywords(all_classes, allowed_keywords)
+
+    # Copy
+    copied = 0
+    for cls_path in allowed_class_folders:
+        dst_cls = dst_root / cls_path.name
+        dst_cls.mkdir(parents=True, exist_ok=True)
+
+        for ext in exts:
+            # handle both lower/upper extensions
+            for f in cls_path.glob(f"*{ext}"):
+                shutil.copy2(f, dst_cls)
+                copied += 1
+            for f in cls_path.glob(f"*{ext.upper()}"):
+                shutil.copy2(f, dst_cls)
+                copied += 1
+
+    return {
+        "mode": "copied_new_filtered",
+        "src_root": str(src_root),
+        "dst_root": str(dst_root),
+        "num_classes": len(allowed_class_folders),
+        "classes": [p.name for p in allowed_class_folders],
+        "num_images": copied,
+        "allowed_keywords": allowed_keywords,
+    }
+
+
+def save_classes_json(class_names, out_path: Path):
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(class_names, f, indent=2, ensure_ascii=False)
+    print(f"Saved classes JSON: {out_path}")
+
+# ======================================================
+# Dataset loading (tf.data) from filtered greenhouse subset
+# ======================================================
+
+def build_datasets_from_directory(
+    data_dir: Path,
+    img_size=(128, 128),
+    batch_size: int = 32,
+    val_split: float = 0.2,
+    seed: int = 42,
+):
+    """
+    Creates train/val datasets from a folder with class subfolders.
+    Returns: train_ds, val_ds, class_names
+    """
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Filtered dataset not found: {data_dir}")
+
+    train_ds = tf.keras.utils.image_dataset_from_directory(
+        data_dir,
+        validation_split=val_split,
+        subset="training",
+        seed=seed,
+        image_size=img_size,
+        batch_size=batch_size,
+    )
+
+    val_ds = tf.keras.utils.image_dataset_from_directory(
+        data_dir,
+        validation_split=val_split,
+        subset="validation",
+        seed=seed,
+        image_size=img_size,
+        batch_size=batch_size,
+    )
+
+    class_names = train_ds.class_names
+
+    # Performance optimizations
+    AUTOTUNE = tf.data.AUTOTUNE
+    train_ds = train_ds.cache().shuffle(1000, seed=seed).prefetch(buffer_size=AUTOTUNE)
+    val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
+
+    return train_ds, val_ds, class_names
+
+
+
+
+
 if __name__ == "__main__":
     # Clean start
     K.clear_session()
@@ -222,7 +371,50 @@ if __name__ == "__main__":
     print("Energy simulation ready. Moving to dataset filtering next.")
 
 
+    # --------------------------------------------------
+    # Filter dataset to greenhouse subset
+    # --------------------------------------------------
+    summary = copy_filtered_dataset(
+        src_root=paths["PLANTVILLAGE_DIR"],
+        dst_root=paths["FILTERED_DIR"],
+        allowed_keywords=ALLOWED_KEYWORDS,
+        overwrite=False,   # set True only if you want to rebuild filtered dataset
+    )
+
+    print("\n" + "=" * 60)
+    print("Greenhouse dataset filtering summary")
+    for k, v in summary.items():
+        if k == "classes":
+            print(f"- {k}: {len(v)} classes")
+        else:
+            print(f"- {k}: {v}")
+    print("=" * 60)
+
+    # save class names for later inference / demo
+    # (we save the filtered folder names)
+    filtered_class_names = summary.get("classes", [])
+    if filtered_class_names:
+        save_classes_json(filtered_class_names, paths["CLASSES_JSON"])
 
 
+    # --------------------------------------------------
+    # Load datasets (train/val) from filtered folder
+    # --------------------------------------------------
+    IMG_SIZE = (128, 128)
+    BATCH_SIZE = 32
+    VAL_SPLIT = 0.2
 
+    train_ds, val_ds, class_names = build_datasets_from_directory(
+        data_dir=paths["FILTERED_DIR"],
+        img_size=IMG_SIZE,
+        batch_size=BATCH_SIZE,
+        val_split=VAL_SPLIT,
+        seed=SEED,
+    )
 
+    print(f"\n Loaded datasets from: {paths['FILTERED_DIR']}")
+    print(f"Num classes: {len(class_names)}")
+    print("py ./src/energy/day03_solar_window_training.py")
+    print("Classes:", class_names)
+    # Save classes again (authoritative from TF loader)
+    save_classes_json(class_names, paths["CLASSES_JSON"])
