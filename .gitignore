@@ -23,3 +23,6 @@ Thumbs.db
 
 # Datasets (local only)
 data/
+
+# Generated artifacts
+artifacts/
