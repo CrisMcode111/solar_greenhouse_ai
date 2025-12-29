@@ -327,6 +327,214 @@ def build_datasets_from_directory(
 
     return train_ds, val_ds, class_names
 
+# ======================================================
+# Model + Callbacks + Steps per Epoch
+# ======================================================
+
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, CSVLogger
+
+
+def build_mobilenetv2_model(num_classes: int, img_size=(128, 128), lr: float = 1e-3):
+    """
+    MobileNetV2 backbone (frozen) + small classification head.
+    Good for quick Day03 training on CPU.
+    """
+    inputs = keras.Input(shape=(img_size[0], img_size[1], 3))
+
+    # MobileNetV2 expects inputs in a specific range; this layer does it
+    x = tf.keras.applications.mobilenet_v2.preprocess_input(inputs)
+
+    base = MobileNetV2(
+        include_top=False,
+        weights="imagenet",
+        input_tensor=x,
+    )
+    base.trainable = False  # Day03: keep it frozen (fast & stable)
+
+    x = base.output
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dropout(0.2)(x)
+    outputs = layers.Dense(num_classes, activation="softmax")(x)
+
+    model = keras.Model(inputs=inputs, outputs=outputs)
+
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=lr),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    return model
+
+
+def build_callbacks(artifacts_dir: Path):
+    ckpt_path = artifacts_dir / "best_model.keras"
+    log_path = artifacts_dir / "training_log.csv"
+
+    callbacks = [
+        ModelCheckpoint(
+            filepath=str(ckpt_path),
+            monitor="val_accuracy",
+            mode="max",
+            save_best_only=True,
+            verbose=1,
+        ),
+        EarlyStopping(
+            monitor="val_accuracy",
+            mode="max",
+            patience=3,
+            restore_best_weights=True,
+            verbose=1,
+        ),
+        CSVLogger(str(log_path), append=True),
+    ]
+    return callbacks, ckpt_path, log_path
+
+
+def compute_steps(ds):
+    """
+    Robust steps computation for tf.data datasets.
+    Returns int or None.
+    """
+    try:
+        card = tf.data.Dataset.cardinality(ds).numpy()
+        if card == tf.data.INFINITE_CARDINALITY or card == tf.data.UNKNOWN_CARDINALITY:
+            return None
+        return int(card)
+    except Exception:
+        return None
+
+# ======================================================
+# Solar Training Loop (Frugal AI)
+# ======================================================
+
+def solar_training_loop(
+    model,
+    train_ds,
+    val_ds,
+    energy_at_hour,
+    threshold: float,
+    callbacks,
+    model_path: Path,
+    hist_csv: Path,
+    num_solar_days: int = 3,
+    hours_to_sim=range(6, 21),   # 06..20
+    train_steps_per_hour: int = 80,   # IMPORTANT: mini-epoch (fast). You can raise later.
+    val_steps: int = 50,
+):
+    """
+    Trains 1 mini-epoch when energy >= threshold.
+    Otherwise sleeps (optionally evaluates).
+    Saves model + history CSV.
+    """
+    history_log = []
+
+    for day in range(1, num_solar_days + 1):
+        print(f"\n====================== Solar Day {day} ======================")
+
+        for h in hours_to_sim:
+            Eh = float(energy_at_hour(float(h)))
+
+            if Eh >= threshold:
+                print(f"[Day {day} | {h:02d}:00] ☀️  E={Eh:.2f} ≥ {threshold} → TRAIN (mini-epoch)")
+
+                hist = model.fit(
+                    train_ds,
+                    epochs=1,
+                    steps_per_epoch=train_steps_per_hour,
+                    validation_data=val_ds,
+                    validation_steps=val_steps,
+                    verbose=1,
+                    callbacks=callbacks,
+                )
+
+                val_acc = float(hist.history.get("val_accuracy", [None])[-1])
+                val_loss = float(hist.history.get("val_loss", [None])[-1])
+                trained = True
+
+            else:
+                print(f"[Day {day} | {h:02d}:00] 🌙  E={Eh:.2f} < {threshold} → SLEEP (no training)")
+
+                # light eval only (optional)
+                try:
+                    val_loss, val_acc = model.evaluate(val_ds, steps=val_steps, verbose=0)
+                    val_loss = float(val_loss)
+                    val_acc = float(val_acc)
+                except Exception:
+                    val_loss, val_acc = None, None
+
+                trained = False
+
+            history_log.append(
+                {
+                    "day": int(day),
+                    "hour": int(h),
+                    "E": Eh,
+                    "trained": trained,
+                    "val_acc": val_acc,
+                    "val_loss": val_loss,
+                }
+            )
+
+    # Save
+    df = pd.DataFrame(history_log)
+    hist_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(hist_csv, index=False)
+    print(f"\n✅ Saved solar history CSV: {hist_csv} ({len(df)} rows)")
+
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    model.save(model_path)
+    print(f"✅ Saved final model: {model_path}")
+
+    return df
+
+# ======================================================
+# Plots: Energy vs Validation metrics
+# ======================================================
+
+def plot_energy_vs_metrics(hist_csv: Path, out_dir: Path):
+    """
+    Generate plots:
+    - Energy vs val_accuracy
+    - Energy vs val_loss
+    """
+    if not hist_csv.exists():
+        raise FileNotFoundError(f"History CSV not found: {hist_csv}")
+
+    df = pd.read_csv(hist_csv)
+
+    # Keep only rows where we have metrics
+    df = df.dropna(subset=["val_acc", "val_loss"])
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Energy vs Accuracy ---
+    plt.figure(figsize=(6, 4))
+    plt.scatter(df["E"], df["val_acc"], alpha=0.7)
+    plt.xlabel("Solar Energy (E)")
+    plt.ylabel("Validation Accuracy")
+    plt.title("Energy vs Validation Accuracy")
+    plt.grid(True)
+    acc_path = out_dir / "energy_vs_val_accuracy.png"
+    plt.tight_layout()
+    plt.savefig(acc_path, dpi=150)
+    plt.close()
+
+    # --- Energy vs Loss ---
+    plt.figure(figsize=(6, 4))
+    plt.scatter(df["E"], df["val_loss"], alpha=0.7)
+    plt.xlabel("Solar Energy (E)")
+    plt.ylabel("Validation Loss")
+    plt.title("Energy vs Validation Loss")
+    plt.grid(True)
+    loss_path = out_dir / "energy_vs_val_loss.png"
+    plt.tight_layout()
+    plt.savefig(loss_path, dpi=150)
+    plt.close()
+
+    print(" Saved plots:")
+    print(f" - {acc_path}")
+    print(f" - {loss_path}")
+
 
 
 
@@ -418,3 +626,77 @@ if __name__ == "__main__":
     print("Classes:", class_names)
     # Save classes again (authoritative from TF loader)
     save_classes_json(class_names, paths["CLASSES_JSON"])
+
+        # --------------------------------------------------
+    # Build model
+    # --------------------------------------------------
+    num_classes = len(class_names)
+    model = build_mobilenetv2_model(
+        num_classes=num_classes,
+        img_size=IMG_SIZE,
+        lr=1e-3,
+    )
+    model.summary()
+
+    # --------------------------------------------------
+    # Callbacks
+    # --------------------------------------------------
+    callbacks, ckpt_path, log_path = build_callbacks(paths["ARTIFACTS_DIR"])
+    print(f" Checkpoint: {ckpt_path}")
+    print(f" CSV log   : {log_path}")
+
+    # --------------------------------------------------
+    # Steps per epoch
+    # --------------------------------------------------
+    STEPS_PER_EPOCH = compute_steps(train_ds)
+    VALIDATION_STEPS = compute_steps(val_ds)
+
+    print(f"STEPS_PER_EPOCH  = {STEPS_PER_EPOCH}")
+    print(f"VALIDATION_STEPS = {VALIDATION_STEPS}")
+
+    # Safety fallback (in case cardinality is None)
+    if STEPS_PER_EPOCH is None:
+        STEPS_PER_EPOCH = 50
+        print(" STEPS_PER_EPOCH unknown → fallback to 50")
+    if VALIDATION_STEPS is None:
+        VALIDATION_STEPS = 10
+        print(" VALIDATION_STEPS unknown → fallback to 10")
+
+
+    # --------------------------------------------------
+    # Solar training loop (fast settings for CPU)
+    # --------------------------------------------------
+    NUM_SOLAR_DAYS = 3
+    HOURS_TO_SIM = range(6, 21)   # 06..20
+
+    # IMPORTANT: keep small first, then increase if you want
+    TRAIN_STEPS_PER_HOUR = 80
+    VAL_STEPS = 50
+
+    hist_df = solar_training_loop(
+        model=model,
+        train_ds=train_ds,
+        val_ds=val_ds,
+        energy_at_hour=energy_at_hour,
+        threshold=THRESHOLD,
+        callbacks=callbacks,
+        model_path=paths["MODEL_PATH"],
+        hist_csv=paths["HIST_CSV"],
+        num_solar_days=NUM_SOLAR_DAYS,
+        hours_to_sim=HOURS_TO_SIM,
+        train_steps_per_hour=TRAIN_STEPS_PER_HOUR,
+        val_steps=VAL_STEPS,
+    )
+
+    print("\n Done. Next: plot E vs val_acc/val_loss.")
+
+        # --------------------------------------------------
+    # Final plots (Energy vs metrics)
+    # --------------------------------------------------
+    plot_energy_vs_metrics(
+        hist_csv=paths["HIST_CSV"],
+        out_dir=paths["ARTIFACTS_DIR"],
+    )
+
+    print(" Plots generated. Day03 complete.")
+
