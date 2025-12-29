@@ -47,13 +47,6 @@ def sanity_checks():
     print("=" * 60)
 
 
-if __name__ == "__main__":
-    # Clear previous TF graphs / sessions
-    K.clear_session()
-    gc.collect()
-
-    sanity_checks()
-
 
 # Paths & Artifacts (local, VS Code)
 
@@ -94,6 +87,7 @@ def get_paths():
     }
 
 
+
 def print_paths(paths: dict):
     print("\n" + "=" * 60)
     print("Paths")
@@ -117,11 +111,118 @@ def validate_paths(paths: dict):
 
     return True
 
+# Solar Energy Simulation (Day 03 core)
+from datetime import datetime, timedelta
+
+THRESHOLD = 0.6  # energy gate
+
+
+def build_energy_simulator(
+    sunrise: float = 7.0,
+    sunset: float = 19.0,
+    cloud_strength: float = 0.15,
+    smooth_k: int = 5,
+    seed: int = 42,
+):
+    """
+    Returns:
+      t_hours: np.array of hours [0..24) sampled every 5 minutes
+      E_profile: solar energy with clouds (0..1)
+      E_ideal: ideal solar curve (0..1)
+      energy_at_hour(h): function that returns energy for scalar or array h
+    """
+    start = datetime(2025, 1, 1, 0, 0, 0)
+    minutes = np.arange(0, 24 * 60, 5)
+    times = [start + timedelta(minutes=int(m)) for m in minutes]
+    t_hours = np.array([t.hour + t.minute / 60 for t in times], dtype=float)
+
+    # Idealized day curve (sinus between sunrise and sunset)
+    daylen = sunset - sunrise
+    E_ideal = np.zeros_like(t_hours, dtype=float)
+    mask_day = (t_hours >= sunrise) & (t_hours <= sunset)
+    phase = (t_hours[mask_day] - sunrise) / daylen * np.pi
+    E_ideal[mask_day] = np.sin(phase)
+
+    # Clouds: gaussian noise + moving average smoothing
+    rng = np.random.default_rng(seed)
+    cloud_noise = rng.normal(loc=0.0, scale=cloud_strength, size=E_ideal.shape)
+
+    k = int(max(1, smooth_k))
+    kernel = np.ones(k, dtype=float) / k
+    cloud_noise_smoothed = np.convolve(cloud_noise, kernel, mode="same")
+
+    E_profile = np.clip(E_ideal + cloud_noise_smoothed, 0.0, 1.0)
+
+    def energy_at_hour(h):
+        """
+        Energy at hour h (float) or array-like of hours in [0..24).
+        Uses linear interpolation on the precomputed profile.
+        """
+        h_arr = np.atleast_1d(h).astype(float)
+        h_arr = np.clip(h_arr, 0.0, 23.999)
+        e_arr = np.interp(h_arr, t_hours, E_profile)
+        return float(e_arr[0]) if np.isscalar(h) else e_arr
+
+    return t_hours, E_profile, E_ideal, energy_at_hour
+
+
+def save_energy_plot(t_hours, E_profile, E_ideal, threshold, out_path: Path):
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.figure(figsize=(10, 3))
+    plt.plot(t_hours, E_profile, label="E_solar (cu nori)")
+    plt.plot(t_hours, E_ideal, linestyle=":", label="E_ideal (fără nori)")
+    plt.axhline(threshold, linestyle="--", label=f"Prag={threshold}")
+    plt.xlim(0, 24)
+    plt.ylim(0, 1.05)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f" Saved energy plot: {out_path}")
+
 
 if __name__ == "__main__":
-    # ... existing sanity checks already ran above ...
+    # Clean start
+    K.clear_session()
+    gc.collect()
+
+    # Sanity checks
+    sanity_checks()
+
+    # Paths
     paths = get_paths()
     print_paths(paths)
     validate_paths(paths)
-    print(" Paths OK. Ready for next steps.")
+    print("Paths OK. Ready for energy simulation.")
+
+    # Energy simulation (Day 03 core)
+    t_hours, E_profile, E_ideal, energy_at_hour = build_energy_simulator(
+        sunrise=7.0,
+        sunset=19.0,
+        cloud_strength=0.15,
+        smooth_k=5,
+        seed=42,
+    )
+
+    save_energy_plot(
+        t_hours,
+        E_profile,
+        E_ideal,
+        THRESHOLD,
+        paths["ARTIFACTS_DIR"] / "energy_profile.png",
+    )
+
+
+    # Quick energy checks
+    print("Energy check @ 06:00 =", energy_at_hour(6.0))
+    print("Energy check @ 12:00 =", energy_at_hour(12.0))
+    print("Energy check @ 20:00 =", energy_at_hour(20.0))
+
+    print("Energy simulation ready. Moving to dataset filtering next.")
+
+
+
+
+
 
