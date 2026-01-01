@@ -189,6 +189,10 @@ def ensure_csv_header(path: Path):
             "val_acc",
             "best_val_acc_so_far",
             "spent_cumulative_units"
+            "cooldown_remaining",
+            "stagnation_count",
+            "blocked_reason"
+
         ])
 
 
@@ -212,6 +216,7 @@ def run_season(
     cfg: BudgetConfig,
     data_dir: str,
     base_seed: int,
+    cooldown_hours: int,
 ) -> Dict[str, List[float]]:
     # load once
     train_ds, val_ds, num_classes = load_day03_datasets(data_dir)
@@ -220,38 +225,51 @@ def run_season(
     ensure_csv_header(LOG_CSV_PATH)
 
     best_val_acc = -1.0
+    cooldown_remaining = 0
+
     spent_cumulative = 0
 
     hours = list(range(24))
     timeline_val_acc = []
     timeline_spent = []
 
+    cooldown_remaining = 0
+
+
     for day in range(days):
         budget_remaining = cfg.daily_budget_units
-
         energies = generate_hourly_energy(profile, day_index=day, hours=hours, base_seed=base_seed)
 
-        for h, E in zip(hours, energies):
-            available_units = energy_to_available_units(E, cfg)
+    for h, E in zip(hours, energies):
+        blocked_reason = ""
 
-            before = budget_remaining
-            sp = steps_possible(available_units, budget_remaining, cfg)
+        # tick cooldown
+        if cooldown_remaining > 0:
+            cooldown_remaining -= 1
 
-            # Default: if not enough steps -> eval only
-            steps_run = 0
+        available_units = energy_to_available_units(E, cfg)
+
+        before = budget_remaining
+        sp = steps_possible(available_units, budget_remaining, cfg)
+
+        steps_run = 0
+        trained = False
+
+        # frugal modifiers (existing)
+        stagnating = detect_stagnation(timeline_val_acc, cfg)
+        if stagnating and sp > 0:
+            sp = max(cfg.min_steps_to_train, int(sp * cfg.reduce_steps_factor))
+
+        if budget_remaining < cfg.low_budget_threshold:
+            sp = min(sp, cfg.min_steps_to_train)
+
+        # --- cooldown guard ---
+        if cooldown_remaining > 0:
             trained = False
-
-            # frugal modifiers
-            stagnating = detect_stagnation(timeline_val_acc, cfg)
-            if stagnating and sp > 0:
-                sp = max(cfg.min_steps_to_train, int(sp * cfg.reduce_steps_factor))
-
-            # low-budget behavior: prefer eval + checkpoint
-            if budget_remaining < cfg.low_budget_threshold:
-                sp = min(sp, cfg.min_steps_to_train)  # tiny training max
-
+            steps_run = 0
+            blocked_reason = "cooldown"
+        else:
             if sp >= cfg.min_steps_to_train and budget_remaining > 0 and available_units > 0:
-                # run training
                 steps_run = min(sp, budget_remaining // cfg.cost_per_step)
                 if steps_run >= cfg.min_steps_to_train:
                     _ = train_for_steps(model, train_ds, steps=steps_run)
@@ -259,48 +277,60 @@ def run_season(
                     spent_now = steps_run * cfg.cost_per_step
                     budget_remaining -= spent_now
                     spent_cumulative += spent_now
+                else:
+                    trained = False
+                    steps_run = 0
+            else:
+                trained = False
+                steps_run = 0
 
-            # always evaluate after (so you can compare train vs no-train hours)
-            val_loss, val_acc = evaluate(model, val_ds)
+        # start cooldown AFTER training
+        if trained:
+            cooldown_remaining = cooldown_hours
 
-            # checkpoint best
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                model.save(BEST_MODEL_PATH)
+        # always evaluate
+        val_loss, val_acc = evaluate(model, val_ds)
 
-            timeline_val_acc.append(val_acc)
-            timeline_spent.append(spent_cumulative)
+        # checkpoint best
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            model.save(BEST_MODEL_PATH)
 
-            # log
-            with LOG_CSV_PATH.open("a", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow([
-                    int(time.time()),
-                    profile.name,
-                    day,
-                    h,
-                    round(E, 6),
-                    available_units,
-                    before,
-                    budget_remaining,
-                    sp,
-                    steps_run,
-                    int(trained),
-                    round(val_loss, 6),
-                    round(val_acc, 6),
-                    round(best_val_acc, 6),
-                    spent_cumulative
-                ])
+        timeline_val_acc.append(val_acc)
+        timeline_spent.append(spent_cumulative)
 
-        # end day
+        # log
+        with LOG_CSV_PATH.open("a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow([
+                int(time.time()),
+                profile.name,
+                day,
+                h,
+                round(float(E), 6),
+                int(available_units),
+                int(before),
+                int(budget_remaining),
+                int(sp),
+                int(steps_run),
+                1 if trained else 0,
+                round(float(val_loss), 6),
+                round(float(val_acc), 6),
+                round(float(best_val_acc), 6),
+                int(spent_cumulative),
+                int(cooldown_remaining),
+                0,                 # stagnation_count (Day05 next)
+                blocked_reason
+            ])
 
-    # final save
+# final save (after all days)
     model.save(FINAL_MODEL_PATH)
 
     return {
         "val_acc": timeline_val_acc,
         "spent": timeline_spent
-    }
+        }
+
 
 
 # ---------------------------
@@ -345,6 +375,28 @@ def main():
     parser.add_argument("--days", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
 
+# Day05: safety & cooldown params 
+    parser.add_argument(
+    "--cooldown_hours",
+    type=int,
+    default=1,
+    help="Number of hours to wait after a training step before allowing training again (anti-thrashing)"
+    )
+
+    parser.add_argument(
+    "--patience_hours",
+    type=int,
+    default=3,
+    help="Number of consecutive hours without validation improvement before triggering safety block"
+    )
+
+    parser.add_argument(
+    "--min_acc_improve",
+    type=float,
+    default=0.002,
+    help="Minimum validation accuracy improvement to be considered meaningful"
+   )
+
     # budget params
     parser.add_argument("--daily_budget_units", type=int, default=1000)
     parser.add_argument("--cost_per_step", type=int, default=1)
@@ -365,8 +417,24 @@ def main():
     # LOG_CSV_PATH.unlink()
 
 
-    winter_res = run_season(WINTER, days=args.days, cfg=cfg, data_dir=args.data_dir, base_seed=args.seed)
-    summer_res = run_season(SUMMER, days=args.days, cfg=cfg, data_dir=args.data_dir, base_seed=args.seed)
+    winter_res = run_season(
+        WINTER,
+        days=args.days,
+        cfg=cfg,
+        data_dir=args.data_dir,
+        base_seed=args.seed,
+        cooldown_hours=args.cooldown_hours,
+   )
+
+    summer_res = run_season(
+        SUMMER,
+        days=args.days,
+        cfg=cfg,
+        data_dir=args.data_dir,
+        base_seed=args.seed,
+        cooldown_hours=args.cooldown_hours,
+    )
+
 
     # plot 1: spent vs acc (use winter by default)
     plot_spent_vs_acc(
