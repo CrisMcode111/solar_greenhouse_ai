@@ -361,7 +361,9 @@ def main():
     )
 
     # fresh csv each run (optional)
-    # if LOG_CSV_PATH.exists(): LOG_CSV_PATH.unlink()
+    # if LOG_CSV_PATH.exists():
+    # LOG_CSV_PATH.unlink()
+
 
     winter_res = run_season(WINTER, days=args.days, cfg=cfg, data_dir=args.data_dir, base_seed=args.seed)
     summer_res = run_season(SUMMER, days=args.days, cfg=cfg, data_dir=args.data_dir, base_seed=args.seed)
