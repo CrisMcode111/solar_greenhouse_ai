@@ -64,9 +64,11 @@ This project is intentionally open-ended and may evolve into a research prototyp
 
 ## Project Status
 
-This repository is currently in an **experimental and exploratory phase**.
+This repository follows a phased, research-oriented approach.
 
-Development is paused intentionally and will resume when time and research focus allow.
+Phase 1 (Energy-Aware Training Logic) is complete and documented.
+Further development is intentionally paced and will resume
+as time and research focus allow.
 
 ---
 
