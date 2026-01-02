@@ -225,9 +225,16 @@ def run_season(
     ensure_csv_header(LOG_CSV_PATH)
 
     best_val_acc = -1.0
-    cooldown_remaining = 0
+    cooldown_remaining = 0      # hours left before training is allowed again
+
+    stagnation_count = 0        # tracks accuracy stagnation to avoid wasting energy on non-improving training
+    last_improve_acc = -1.0     # reference accuracy for detecting meaningful progress
+
+
 
     spent_cumulative = 0
+
+
 
     hours = list(range(24))
     timeline_val_acc = []
@@ -243,9 +250,44 @@ def run_season(
     for h, E in zip(hours, energies):
         blocked_reason = ""
 
-        # tick cooldown
-        if cooldown_remaining > 0:
-            cooldown_remaining -= 1
+
+        # --- Day05: safety guard (stagnation) ---
+        if stagnation_count >= args.patience_hours:
+            trained = False
+            steps_run = 0
+            blocked_reason = "stagnation_safety"
+
+        else:
+            # --- cooldown tick ---
+            if cooldown_remaining > 0:
+                cooldown_remaining -= 1
+
+            # --- cooldown guard ---
+            if cooldown_remaining > 0:
+                trained = False
+                steps_run = 0
+                blocked_reason = "cooldown"
+
+            else:
+                # --- existing energy / budget logic (Day04) ---
+                if sp >= cfg.min_steps_to_train and budget_remaining > 0 and available_units > 0:
+                    steps_run = min(sp, budget_remaining // cfg.cost_per_step)
+                    if steps_run >= cfg.min_steps_to_train:
+                        _ = train_for_steps(model, train_ds, steps=steps_run)
+                        trained = True
+                        spent_now = steps_run * cfg.cost_per_step
+                        budget_remaining -= spent_now
+                        spent_cumulative += spent_now
+                    else:
+                        trained = False
+                        steps_run = 0
+                else:
+                    trained = False
+                    steps_run = 0
+
+        if trained:
+            cooldown_remaining = args.cooldown_hours
+           
 
         available_units = energy_to_available_units(E, cfg)
 
@@ -263,26 +305,8 @@ def run_season(
         if budget_remaining < cfg.low_budget_threshold:
             sp = min(sp, cfg.min_steps_to_train)
 
-        # --- cooldown guard ---
-        if cooldown_remaining > 0:
-            trained = False
-            steps_run = 0
-            blocked_reason = "cooldown"
-        else:
-            if sp >= cfg.min_steps_to_train and budget_remaining > 0 and available_units > 0:
-                steps_run = min(sp, budget_remaining // cfg.cost_per_step)
-                if steps_run >= cfg.min_steps_to_train:
-                    _ = train_for_steps(model, train_ds, steps=steps_run)
-                    trained = True
-                    spent_now = steps_run * cfg.cost_per_step
-                    budget_remaining -= spent_now
-                    spent_cumulative += spent_now
-                else:
-                    trained = False
-                    steps_run = 0
-            else:
-                trained = False
-                steps_run = 0
+         
+        steps_run = 0
 
         # start cooldown AFTER training
         if trained:
@@ -290,6 +314,14 @@ def run_season(
 
         # always evaluate
         val_loss, val_acc = evaluate(model, val_ds)
+
+
+        # --- Day05: safety guard against accuracy stagnation ---
+        if val_acc > last_improve_acc + args.min_acc_improve:
+            last_improve_acc = val_acc
+            stagnation_count = 0
+        else:
+            stagnation_count += 1
 
         # checkpoint best
         if val_acc > best_val_acc:
