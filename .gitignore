@@ -26,3 +26,5 @@ data/
 
 # Generated artifacts
 artifacts/
+
+!docs/PHASE*_*.md
