@@ -78,3 +78,5 @@ This project reflects a personal interest in:
 - and thoughtful experimentation beyond purely theoretical models.
 
 It is not intended as a production-ready solution.
+
+Detailed experimental logs and intermediate analyses are maintained locally under the artifacts/ directory.
