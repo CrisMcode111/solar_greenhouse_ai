@@ -1,3 +1,11 @@
+
+# Energy-aware training scheduler.
+
+# Day04: energy budget & frugal scheduling
+#Day05: safety and cooldown guards for edge stability
+
+
+
 # src/energy/day04_energy_budget_scheduler.py
 
 from __future__ import annotations
