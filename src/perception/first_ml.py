@@ -22,7 +22,7 @@ from src.perception.plant_rules import PlantRuleConfig, compute_risk_flags
 
 
 def main() -> int:
-    out_dir = Path("artifacts/day06")
+    out_dir = Path("artifacts/day07")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     gen_cfg = SensorGenConfig(
@@ -42,7 +42,15 @@ def main() -> int:
         return 1
 
     # Noise (will be NotImplemented for now -> handle gracefully)
-    noise_cfg = NoiseConfig(missing_rate=0.02, spike_rate=0.005, drift_per_day=0.02)
+    noise_cfg = NoiseConfig(
+    missing_rate=0.02,
+    spike_rate=0.005,
+    drift_per_day_map={
+        "inside_temp_c": 0.02,
+        "inside_rh_pct": 0.05,
+    },
+)
+
     try:
         df_noisy = apply_noise(df, noise_cfg)
     except NotImplementedError:
@@ -59,7 +67,7 @@ def main() -> int:
     if missing:
         print("[WARN] Missing expected columns:", missing)
 
-    out_path = out_dir / "phase2_day06_synthetic_sensors_sample.csv"
+    out_path = out_dir / "synthetic_sensors_noisy.csv"
     df_final.to_csv(out_path, index=False)
     print("[OK] Saved:", out_path)
     print(df_final.head(3).to_string(index=False))

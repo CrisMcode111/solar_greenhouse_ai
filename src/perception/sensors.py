@@ -25,7 +25,7 @@ import pandas as pd
 class SensorGenConfig:
     start: str
     end: str
-    freq: str = "1H"
+    freq: str = "1h"
     tz: str = "Europe/Paris"
     seed: int = 42
 
