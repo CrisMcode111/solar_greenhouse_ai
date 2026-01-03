@@ -22,7 +22,7 @@ from src.perception.plant_rules import PlantRuleConfig, compute_risk_flags
 
 
 def main() -> int:
-    out_dir = Path("outputs")
+    out_dir = Path("artifacts/day06")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     gen_cfg = SensorGenConfig(
