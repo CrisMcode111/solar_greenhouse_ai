@@ -66,8 +66,11 @@ class SystemLogger:
             "rule_flags": outcome.get("rule_flags"),
         }
 
+        flat_row["threshold_temp_hi"] = 30
+        flat_row["threshold_rh_hi"] = 85
+
         # flatten a few state fields (keep it small; detailed state goes to JSONL)
-        for k in ("inside_temp_c", "inside_rh_pct", "light_lux", "energy_available_wh"):
+        for k in ("temp_c", "rh_pct", "light_lux", "energy_available_wh"):
             if k in state:
                 flat_row[k] = state[k]
 

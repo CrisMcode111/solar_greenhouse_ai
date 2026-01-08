@@ -133,40 +133,45 @@ def main() -> int:
     run_id = f"day11_{utc_now_iso()}"
     logger = SystemLogger(out_dir=out_dir, run_id=run_id)
 
-    # mini-loop
-    n = min(len(df), args.max_steps)
-    for i in range(n):
-        row = df.iloc[i]
-        state = build_state(row, colmap)
+    try:
+        n = min(len(df), args.max_steps)
 
-        # constraints
-        energy_ok = True
-        if colmap["energy_ok"] is not None:
-            val = row.get(colmap["energy_ok"])
-            # normalize to bool-ish
-            if isinstance(val, str):
-                energy_ok = val.strip().lower() in ("1", "true", "yes", "ok")
-            else:
-                try:
-                    energy_ok = bool(int(val))
-                except Exception:
-                    energy_ok = bool(val)
+        for i in range(n):
+            row = df.iloc[i]
+            state = build_state(row, colmap)
 
-        constraints = {"energy_ok": energy_ok}
+            # constraints: energy_ok
+            energy_ok = True
+            if colmap["energy_ok"] is not None:
+                val = row.get(colmap["energy_ok"])
+                if isinstance(val, str):
+                    energy_ok = val.strip().lower() in ("1", "true", "yes", "ok")
+                else:
+                    try:
+                        energy_ok = bool(int(val))
+                    except Exception:
+                        energy_ok = bool(val)
 
-        action, why = decide_action(state, energy_ok)
-        outcome = compute_outcome(state)
+            constraints = {"energy_ok": energy_ok}
 
-        logger.log_step(
-            step_idx=i,
-            state=state,
-            action=action,
-            constraints=constraints,
-            outcome=outcome,
-            why=why,
-        )
+            action, why = decide_action(state, energy_ok)
+            outcome = compute_outcome(state)
 
-    logger.close()
+            logger.log_step(
+                step_idx=i,
+                state=state,
+                action=action,
+                constraints=constraints,
+                outcome=outcome,
+                why=why,
+            )
+
+            # optional progress
+            if i % 50 == 0:
+                print(f"[Day11] step {i}/{n}")
+
+    finally:
+        logger.close()
 
     # metrics summary
     metrics_path = write_metrics_summary(out_dir)
@@ -190,6 +195,7 @@ def main() -> int:
 
     print(f"[Day11] Done. Artifacts at: {out_dir}")
     print(f"[Day11] Metrics: {metrics_path}")
+
     return 0
 
 
