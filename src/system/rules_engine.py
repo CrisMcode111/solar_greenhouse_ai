@@ -17,10 +17,17 @@ class RulesConfig:
     rh_hi_pct: float = 85.0
 
     # Irrigation thresholds (if soil moisture exists)
-    soil_moisture_lo: float = 0.25  # normalized 0..1, tune later
+    soil_moisture_lo: float = 0.42  # normalized 0..1, tune later
 
     # Risk flags handling
-    risk_ventilate_flags: Tuple[str, ...] = ("rh_out_of_bounds", "mold_risk", "fungal_risk")
+    risk_ventilate_flags: Tuple[str, ...] = (
+    "risk_high_humidity",
+    "risk_heat_stress",
+    "rh_out_of_bounds",
+    "mold_risk",
+    "fungal_risk",
+)
+
     risk_irrigate_flags: Tuple[str, ...] = ("water_stress", "drought_risk")
 
     # Energy gating

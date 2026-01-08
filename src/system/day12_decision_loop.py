@@ -27,20 +27,18 @@ def extract_risk_flags(row: pd.Series) -> List[str]:
     """
     flags: List[str] = []
 
+    # style 1: single list-like column
     if "rule_flags" in row.index and pd.notna(row["rule_flags"]):
         val = row["rule_flags"]
         if isinstance(val, str):
-            # very lightweight parse
-            s = val.strip()
-            # remove brackets
-            s = s.strip("[]")
+            s = val.strip().strip("[]")
             if s:
                 parts = [p.strip().strip("'").strip('"') for p in s.split(",")]
                 flags.extend([p for p in parts if p])
         elif isinstance(val, list):
             flags.extend([str(x) for x in val])
 
-    # boolean columns
+    # style 2: boolean columns
     for col in row.index:
         if col.startswith("risk_") or col.startswith("flag_"):
             try:
@@ -54,8 +52,24 @@ def extract_risk_flags(row: pd.Series) -> List[str]:
             except Exception:
                 continue
 
-    # de-dup
     return sorted(list(set(flags)))
+
+
+def normalize_soil_moisture(x: Any) -> Any:
+    """
+    Make soil_moisture usable by rules:
+    - if it's > 1.5 we assume it's 0..100 and convert to 0..1
+    - otherwise leave as-is (already normalized or missing)
+    """
+    if x is None:
+        return None
+    try:
+        v = float(x)
+        if v > 1.5:
+            return v / 100.0
+        return v
+    except Exception:
+        return x
 
 
 def main() -> int:
@@ -72,7 +86,6 @@ def main() -> int:
     schema_ok, schema_txt, schema_summary = check_schema(df)
     (out_dir / "schema_check.txt").write_text(schema_txt, encoding="utf-8")
 
-    # column mapping (tolerant)
     colmap = {
         "timestamp": pick_col(df, ["ts", "timestamp", "datetime", "time"]),
         "inside_temp_c": pick_col(df, ["inside_temp_c", "temp_c", "t_inside_c", "temperature_c"]),
@@ -83,15 +96,12 @@ def main() -> int:
         "soil_moisture": pick_col(df, ["soil_moisture", "soil_moisture_norm", "soil_moisture_pct"]),
     }
 
-    # config (can be extended later via CLI/JSON)
+    # Rules configuration
     cfg = RulesConfig()
-
-    # save config
     write_json(out_dir / "rules_config.json", config_to_json(cfg))
 
     run_id = f"day12_{utc_now_iso()}"
 
-    # output CSV
     trace_path = out_dir / "actions_trace.csv"
     confusion_path = out_dir / "confusion_rules_vs_risks.csv"
 
@@ -113,7 +123,6 @@ def main() -> int:
 
     n = min(len(df), args.max_steps)
 
-    # For optional sanity check
     confusion_rows: List[Dict[str, Any]] = []
 
     with trace_path.open("w", newline="", encoding="utf-8") as f:
@@ -133,7 +142,7 @@ def main() -> int:
                 "inside_rh_pct": get("inside_rh_pct"),
                 "light_lux": get("light_lux"),
                 "energy_available_wh": get("energy_available_wh"),
-                "soil_moisture": get("soil_moisture"),
+                "soil_moisture": normalize_soil_moisture(get("soil_moisture")),
             }
 
             constraints = {"energy_ok": get("energy_ok")}
@@ -141,11 +150,12 @@ def main() -> int:
 
             action, why, debug = decide(state, constraints, risk_flags, cfg)
 
+            # Trace row
             w.writerow({
                 "run_id": run_id,
                 "step_idx": i,
                 "ts": state.get("timestamp"),
-                "energy_ok": debug.get("energy_ok"),
+                "energy_ok": bool(debug.get("energy_ok")),
                 "inside_temp_c": debug.get("temp_c"),
                 "inside_rh_pct": debug.get("rh_pct"),
                 "soil_moisture": debug.get("soil_moisture"),
@@ -157,16 +167,20 @@ def main() -> int:
                 "why": why,
             })
 
-            # optional confusion: when risk flags exist but action stayed OFF
+            # Confusion classification
             has_risk = len(risk_flags) > 0
             acted = bool(action["vent_on"] or action["irrigate"])
+            energy_ok = bool(debug.get("energy_ok"))
+
             confusion_rows.append({
                 "step_idx": i,
                 "has_risk": has_risk,
                 "acted": acted,
-                "energy_ok": debug.get("energy_ok"),
+                "energy_ok": energy_ok,
                 "risk_flags": "|".join(risk_flags),
                 "why": why,
+                "conflict_energy": bool(has_risk and (not acted) and (not energy_ok)),
+                "missed_risk": bool(has_risk and (not acted) and energy_ok),
             })
 
     # write confusion table
