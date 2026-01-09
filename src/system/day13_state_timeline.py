@@ -45,6 +45,7 @@ def main() -> int:
         "inside_rh_pct": pick_col(df, ["inside_rh_pct", "rh_pct", "humidity_pct"]),
         "soil_moisture": pick_col(df, ["soil_moisture", "soil_moisture_norm", "soil_moisture_pct"]),
         "energy_ok": pick_col(df, ["energy_ok"]),
+        "outside_temp_c": pick_col(df, ["outside_temp_c"]),
     }
 
     n = min(len(df), int(args.max_steps))
@@ -67,6 +68,7 @@ def main() -> int:
             "inside_rh_pct": get("inside_rh_pct"),
             "soil_moisture": get("soil_moisture"),
             "energy_ok": get("energy_ok"),
+            "outside_temp_c": get("outside_temp_c"),
         }
 
         mapped = map_state(raw_state, cfg)

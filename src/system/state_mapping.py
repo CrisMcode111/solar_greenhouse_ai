@@ -23,6 +23,12 @@ SOIL_WET = "WET"
 ENERGY_OK = "OK"
 ENERGY_NOT_OK = "NOT_OK"
 
+# Outside temperature discrete states (season-aware context)
+OUT_FREEZING = "FREEZING"
+OUT_COLD = "COLD"
+OUT_MILD = "MILD"
+OUT_HOT = "HOT"
+
 UNKNOWN = "UNKNOWN"
 
 
@@ -33,14 +39,16 @@ class StateMappingConfig:
       - temp_hi_c = 30.0
       - rh_hi_pct = 85.0
       - soil_moisture_lo = 0.42 (after normalization 0..1)
-    Also includes reasonable 'low' and 'wet' thresholds to create 3-bin states.
+
+    Adds outside temperature bins to enable season-aware decisions:
+      OUT_TEMP_STATE: FREEZING / COLD / MILD / HOT / UNKNOWN
     """
 
-    # Temperature thresholds (°C)
+    # Temperature thresholds (°C) - inside
     temp_lo_c: float = 12.0
     temp_hi_c: float = 30.0
 
-    # Relative humidity thresholds (%)
+    # Relative humidity thresholds (%) - inside
     rh_lo_pct: float = 35.0
     rh_hi_pct: float = 85.0
 
@@ -51,12 +59,19 @@ class StateMappingConfig:
     # If soil comes in 0..100, normalize to 0..1
     normalize_soil_over: float = 1.5
 
+    # Outside temperature bins (°C)
+    out_freezing_c: float = 0.0    # < 0 => FREEZING
+    out_cold_c: float = 8.0        # [0, 8) => COLD
+    out_mild_c: float = 20.0       # [8, 20] => MILD
+    # > 20 => HOT
+
     # Formatting of state codes
     sep: str = "|"
     prefix_temp: str = "T"
     prefix_soil: str = "S"
     prefix_humid: str = "H"
     prefix_energy: str = "E"
+    prefix_outside: str = "O"
 
 
 def _to_float(x: Any) -> float:
@@ -174,11 +189,39 @@ def map_energy(energy_ok: Any) -> Tuple[str, List[str]]:
         return state, reasons
 
 
+def map_outside_temp(outside_temp_c: Any, cfg: StateMappingConfig) -> Tuple[str, List[str]]:
+    """
+    Map outside temperature into discrete bins:
+      FREEZING (< 0)
+      COLD ([0, 8))
+      MILD ([8, 20])
+      HOT (> 20)
+    """
+    v = _to_float(outside_temp_c)
+    reasons: List[str] = []
+    if not _is_finite(v):
+        return UNKNOWN, ["outside temp missing/unparseable"]
+
+    if v < cfg.out_freezing_c:
+        reasons.append(f"outside {v:.2f} < {cfg.out_freezing_c:.2f} (freezing)")
+        return OUT_FREEZING, reasons
+    if v < cfg.out_cold_c:
+        reasons.append(f"outside {v:.2f} in [{cfg.out_freezing_c:.2f}, {cfg.out_cold_c:.2f}) (cold)")
+        return OUT_COLD, reasons
+    if v <= cfg.out_mild_c:
+        reasons.append(f"outside {v:.2f} in [{cfg.out_cold_c:.2f}, {cfg.out_mild_c:.2f}] (mild)")
+        return OUT_MILD, reasons
+
+    reasons.append(f"outside {v:.2f} > {cfg.out_mild_c:.2f} (hot)")
+    return OUT_HOT, reasons
+
+
 def make_state_code(
     temp_state: str,
     soil_state: str,
     humid_state: str,
     energy_state: str,
+    outside_temp_state: str,
     cfg: StateMappingConfig,
 ) -> str:
     return cfg.sep.join(
@@ -187,6 +230,7 @@ def make_state_code(
             f"{cfg.prefix_soil}_{soil_state}",
             f"{cfg.prefix_humid}_{humid_state}",
             f"{cfg.prefix_energy}_{energy_state}",
+            f"{cfg.prefix_outside}_{outside_temp_state}",
         ]
     )
 
@@ -203,9 +247,10 @@ def map_state(
       - inside_rh_pct
       - soil_moisture
       - energy_ok
+      - outside_temp_c   (NEW for season-aware context)
 
     Returns dict with:
-      - temp_state, humid_state, soil_state, energy_state
+      - temp_state, humid_state, soil_state, energy_state, outside_temp_state
       - soil_moisture_norm (float or NaN)
       - state_code
       - explanation (string)
@@ -217,14 +262,23 @@ def map_state(
     humid_state, humid_reasons = map_humid(raw.get("inside_rh_pct"), cfg)
     soil_state, soil_reasons, soil_norm = map_soil(raw.get("soil_moisture"), cfg)
     energy_state, energy_reasons = map_energy(raw.get("energy_ok"))
+    outside_temp_state, out_reasons = map_outside_temp(raw.get("outside_temp_c"), cfg)
 
-    state_code = make_state_code(temp_state, soil_state, humid_state, energy_state, cfg)
+    state_code = make_state_code(
+        temp_state=temp_state,
+        soil_state=soil_state,
+        humid_state=humid_state,
+        energy_state=energy_state,
+        outside_temp_state=outside_temp_state,
+        cfg=cfg,
+    )
 
     parts: List[str] = []
     parts.extend(temp_reasons)
     parts.extend(humid_reasons)
     parts.extend(soil_reasons)
     parts.extend(energy_reasons)
+    parts.extend(out_reasons)
 
     explanation = "; ".join(parts)
 
@@ -233,8 +287,10 @@ def map_state(
         "humid_state": humid_state,
         "soil_state": soil_state,
         "energy_state": energy_state,
+        "outside_temp_state": outside_temp_state,
         "soil_moisture_norm": soil_norm,
         "state_code": state_code,
         "explanation": explanation,
         "explanation_parts": parts,
     }
+
